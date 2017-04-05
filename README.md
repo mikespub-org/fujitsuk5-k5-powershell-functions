@@ -1,5 +1,6 @@
 # k5-powershell-functions
 
+```
 NAME
     Get-K5Token
     
@@ -324,3 +325,4 @@ PARAMETERS
     PS C:\>Get-K5WindowsPassword -token $token -servername WinTest -key C:\Path\To\My\PrivateKey.pem -UseProxy
     
     X672WKSztcYDtL9Tb6Raf
+    ```
