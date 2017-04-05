@@ -111,6 +111,14 @@ $vnc_console = @"
 }
 "@
 
+$tty_console = @"
+{
+  "os-getConsoleOutput": {
+    "length": $lines
+  }
+}
+"@
+
 $vpnservice = @"
 {
   "vpnservice": {
