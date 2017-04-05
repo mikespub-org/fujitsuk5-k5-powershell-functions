@@ -302,7 +302,7 @@ SYNTAX
     
     
 DESCRIPTION
-    The Get-K5WindowsPassword function decrypts the buid time auto generated  k5user administrative user's password using the
+    The Get-K5WindowsPassword function decrypts the build time auto generated  k5user administrative user's password using the
     private key associated with the server when it was built
     
 
