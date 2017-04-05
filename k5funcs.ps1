@@ -70,7 +70,7 @@ PS C:\>$token = Get-K5Token
 
     .EXAMPLE
 
-    # Retrieve a token supplying al required authentication information and store in $token for future use, use the proxy when making the call
+    # Retrieve a token supplying all required authentication information and store in $token for future use, use the proxy when making the call
 
 PS C:\>$token = Get-K5Token -region de-1 -contract mycontract -user myuser -password mypassword -projectname myproject -useProxy
 
@@ -112,7 +112,7 @@ PS C:\>$token.expiry
         [switch]$useProxy
     )
 
-    # URL for the secified region's identity service, future calls will use the endpoint returned when retrieving the token
+    # URL for the specified region's identity service, future calls will use the endpoint returned when retrieving the token
     $regional_identity_url = "https://identity.$region.cloud.global.fujitsu.com/v3/auth/tokens"
     # Global identity service URL
     $global_identity_url = "https://auth-api.jp-east-1.paas.cloud.global.fujitsu.com/API/paas/auth/token"
@@ -140,7 +140,7 @@ PS C:\>$token.expiry
         catch
         {
             # If something went wrong, display an error and exit
-            Display-Error -error "Global token retrieval failed...`n$($_.Exception.Message)"
+            Display-Error -error "Global token retrieval failed..." -errorObj $_
         }
         # Exit and return the token object
         return $token
