@@ -7,3 +7,4 @@
 "k5_de_contract","de_contract"
 "k5_fi_contract","fi_contract"
 "OpenSSLPath","C:\your\path\to\openssl.exe"
+"thumbprint","ClientCertThumbprint"
