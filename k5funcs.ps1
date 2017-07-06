@@ -90,7 +90,7 @@ PS C:\>$token.expiry
     param
     (
         # Region parameter - default to uk-1
-        [Parameter()][ValidateSet('de-1','fi-1','uk-1','es-1')][string]$region = "uk-1",
+        [Parameter()][ValidateSet('de-1','fi-1','uk-1','es-1','jp-east-1')][string]$region = "uk-1",
         # Contract parameter - default to appropriate free tier contract for the specified region
         [string]$contract = $(
                                 switch ($region)
@@ -122,7 +122,8 @@ PS C:\>$token.expiry
     # Default header for REST API calls, accept JSON returns
     $headers = @{"Accept" = "application/json"}
     # Define the token object for the function return
-    $token = "" | select "token","projectid","userid","domainid","expiry","endpoints","projects"
+    $token = "" | select "token","region","projectid","userid","domainid","expiry","endpoints","projects"
+    $token.region = $region
 
     # Check if we need to return a globally scoped token
     if ($global)
@@ -138,7 +139,7 @@ PS C:\>$token.expiry
             # Set the token property stored in the headers of the API return
             $token.token = @{"Token" = $detail.headers["X-Access-Token"]}
             # Set the token expiry time
-            $token.expiry = ([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
+            $token.expiry = [DateTime]([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
         }
         catch
         {
@@ -175,7 +176,7 @@ PS C:\>$token.expiry
     # Retrieve the endpoints from the API return and set the endpoints property accordingly
     $token.endpoints = Process-Endpoints $return.token.catalog.endpoints
     # Set the token expiry property
-    $token.expiry = ([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
+    $token.expiry = [DateTime]([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
     # Add the token to the headers object for authenticating the following API calls 
     $headers += $token.token
     # Enumerate the projects available to this user
@@ -223,7 +224,7 @@ PS C:\>$token.expiry
         # Set the token property
         $token.token = @{"X-Auth-Token" = $detail.headers["X-Subject-Token"]}
         # Set the token expiry property
-        $token.expiry = ([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
+        $token.expiry = [DateTime]([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
     }
     # Return the token object
     return $token
@@ -452,6 +453,8 @@ metadata                             : @{admin_pass=}
     $type_user  = "users","groups"
     $type_role = "roles"
     $type_stack = "stacks"
+    $type_db = "instances"
+    $type_limit = "limits"
     $validtypes = ((Get-Variable -name type_*).Value | sort) -join ", " 
     switch ($type)
     {
@@ -459,16 +462,30 @@ metadata                             : @{admin_pass=}
        {$_ -in $type_fw}    {$endpoint = $token.endpoints["networking"] + "/v2.0/fw/" + $type}
        {$_ -in $type_vpn}   {$endpoint = $token.endpoints["networking"] + "/v2.0/vpn/" + $type}
        {$_ -in $type_comp}  {$endpoint = $token.endpoints["compute"] +"/" + $type}
+       {$_ -in $type_limit} {$endpoint = $token.endpoints["compute"] +"/" + $type}
        {$_ -in $type_block} {$endpoint = $token.endpoints["blockstoragev2"] +"/" + $type}
        {$_ -in $type_obj}   {$endpoint = $token.endpoints["objectstorage"] + "/?format=json"}
        {$_ -in $type_user}  {$endpoint = $token.endpoints["identityv3"] + "/" + $type + "/?domain_id=" + $token.domainid}
        {$_ -in $type_role}  {$endpoint = $token.endpoints["identityv3"] + "/roles"}
        {$_ -in $type_stack} {$endpoint = $token.endpoints["orchestration"] +"/stacks"}
+       {$_ -in $type_db}    {$endpoint = $token.endpoints["database"] +"/instances"}
        default              {Display-Error -error "Unknown type `'$type`' - acceptable values are $validtypes"}
     }
     if (-not $endpoint){break}
     try
     {
+        if ($type -in $type_limit)
+        {
+            $return = @()
+            $detail = (Invoke-WebRequest2 -token $token -Uri "${endpoint}?availability_zone=$($token.region)a" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy | ConvertFrom-Json).limits.absolute
+            $detail | Add-Member -MemberType NoteProperty -Name "AZ" -Value "$($token.region)a"
+            $return += $detail
+            $detail = (Invoke-WebRequest2 -token $token -Uri "${endpoint}?availability_zone=$($token.region)b" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy | ConvertFrom-Json).limits.absolute
+            $detail | Add-Member -MemberType NoteProperty -Name "AZ" -Value "$($token.region)b"
+            $return += $detail
+            return $return
+            break
+        }
         $detail = (Invoke-WebRequest2 -token $token -Uri "$endpoint" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy).content | ConvertFrom-Json
         if ($detail)
         {
@@ -529,8 +546,13 @@ metadata                             : @{admin_pass=}
     {
         Display-Error -error "Get-K5Resources failed..." -errorObj $_
     }
+    foreach ($object in $return)
+    {
+        $object | Add-Member -MemberType NoteProperty -Name "self" -Value "$endpoint/$($object.id)"
+    }
     return $return
 }
+
 
 Function Get-K5RoleToGroupAssignments
 {
