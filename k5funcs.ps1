@@ -16,7 +16,8 @@ Function Get-K5Token
     should be saved in a variable and used to authenticate subsequent calls to K5 API endpoints. If called without parameters the region
     will default to uk-1 and contract, username, password, and project will be retrieved from k5env.csv which must exist in the same
     location as the script containing this function and be formatted as follows (OpenSSLPath only required if you intend to use the
-    Get-K5WindowsPassword function to decrypt the k5user password assigned during the build process):
+    Get-K5WindowsPassword function to decrypt the k5user password assigned during the build process, thumbprint only required if your
+    user is configured for two factor auth):
 
     "name","value"
     "k5user","username"
@@ -27,6 +28,7 @@ Function Get-K5Token
     "k5_de_contract","de_contract"
     "k5_fi_contract","fi_contract"
     "OpenSSLPath","C:\your\path\to\openssl.exe"
+    "thumbprint","ClientCertThumbprint"
 
     The object returned by the Get-K5Token function has a number of properties:
     
@@ -88,7 +90,7 @@ PS C:\>$token.expiry
     param
     (
         # Region parameter - default to uk-1
-        [Parameter()][ValidateSet('de-1','fi-1','uk-1')][string]$region = "uk-1",
+        [Parameter()][ValidateSet('de-1','fi-1','uk-1','es-1','jp-east-1')][string]$region = "uk-1",
         # Contract parameter - default to appropriate free tier contract for the specified region
         [string]$contract = $(
                                 switch ($region)
@@ -96,6 +98,7 @@ PS C:\>$token.expiry
                                     "uk-1" {$((Get-K5Vars)["k5_uk_contract"])}
                                     "fi-1" {$((Get-K5Vars)["k5_fi_contract"])}
                                     "de-1" {$((Get-K5Vars)["k5_de_contract"])}
+                                    "es-1" {$((Get-K5Vars)["k5_es_contract"])}
                                 }
                             ),
         # User parameter - default to required user
@@ -119,7 +122,8 @@ PS C:\>$token.expiry
     # Default header for REST API calls, accept JSON returns
     $headers = @{"Accept" = "application/json"}
     # Define the token object for the function return
-    $token = "" | select "token","projectid","userid","domainid","expiry","endpoints","projects"
+    $token = "" | select "token","region","projectid","userid","domainid","expiry","endpoints","projects"
+    $token.region = $region
 
     # Check if we need to return a globally scoped token
     if ($global)
@@ -135,7 +139,7 @@ PS C:\>$token.expiry
             # Set the token property stored in the headers of the API return
             $token.token = @{"Token" = $detail.headers["X-Access-Token"]}
             # Set the token expiry time
-            $token.expiry = ([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
+            $token.expiry = [DateTime]([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
         }
         catch
         {
@@ -172,7 +176,7 @@ PS C:\>$token.expiry
     # Retrieve the endpoints from the API return and set the endpoints property accordingly
     $token.endpoints = Process-Endpoints $return.token.catalog.endpoints
     # Set the token expiry property
-    $token.expiry = ([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
+    $token.expiry = [DateTime]([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
     # Add the token to the headers object for authenticating the following API calls 
     $headers += $token.token
     # Enumerate the projects available to this user
@@ -220,7 +224,7 @@ PS C:\>$token.expiry
         # Set the token property
         $token.token = @{"X-Auth-Token" = $detail.headers["X-Subject-Token"]}
         # Set the token expiry property
-        $token.expiry = ([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
+        $token.expiry = [DateTime]([xml.xmlconvert]::ToDateTime($return.token.expires_at)).DateTime
     }
     # Return the token object
     return $token
@@ -261,18 +265,13 @@ Function Display-Error
     Write-Host "Error: $error" -ForegroundColor Red
     if ($errorObj)
     {
-        if ($errorObj.Exception.Message -match "\(407\) Proxy")
-        { 
-            Write-Host "Error: Proxy authentication failed, try using -useProxy parameter" -ForegroundColor Red
-        } else {
-            Write-Host "Exception: $($errorObj.Exception.Message)" -ForegroundColor Red
-            Write-Host "$($errorObj.InvocationInfo.PositionMessage)" -ForegroundColor Red
-        }
+        Write-Host "Exception: $($errorObj.Exception.Message)" -ForegroundColor Red
+        Write-Host "$($errorObj.InvocationInfo.PositionMessage)" -ForegroundColor Red
     }
     break
 }
 
-# Mirror Invoke-WebRequest function to allow use (or not) of proxy within the K5 functions without hardcoding
+# Mirror Invoke-WebRequest function to allow use (or not) of proxy and certificates within the K5 functions without hardcoding
 Function Invoke-WebRequest2
 {
     param
@@ -287,27 +286,31 @@ Function Invoke-WebRequest2
     )
     # If a token was passed in check it's expiry and inform user if it's expired
     if (($token) -and ($token.expiry -le [datetime]::Now)) {Display-Error "Token has expired, please obtain another..."}
-    # Was the -UseProxy switch specified?
-    if ($UseProxy)
+    # Retrieve certificate thumbprint if it's been set
+    $thumbprint = $((Get-K5Vars)["thumbprint"])
+    # Base comand
+    $cmd = 'Invoke-WebRequest -Uri $Uri -Method $Method -headers $Headers -ContentType $ContentType '
+    # Add body if required
+    if ($Body) {$cmd = $cmd + '-Body $Body '}
+    # Add proxy if required
+    if ($UseProxy) {$cmd = $cmd + '-Proxy $((Get-K5Vars)["proxyURL"]) -ProxyUseDefaultCredentials '}
+    # Add certificate thumbprint if required
+    if ($thumbprint) {$cmd = $cmd + '-CertificateThumbprint $thumbprint '}
+    try
     {
-        # We're using a proxy, was there a body passed?
-        if ($Body)
+        $return = Invoke-Expression $cmd
+    }
+    catch
+    {
+        # Check to see if proxy auth failed and user forgot to specify using a proxy...
+        if (($_.Exception.Message -match "\(407\) Proxy") -and (-not $useProxy))
+        # We need to try the proxy
         {
-            # Invoke web request using proxy including body
-            $return = Invoke-WebRequest -Uri $Uri -Method $Method -headers $Headers -Body $Body -ContentType $ContentType -Proxy $((Get-K5Vars)["proxyURL"]) -ProxyUseDefaultCredentials
+            $cmd = $cmd + '-Proxy $((Get-K5Vars)["proxyURL"]) -ProxyUseDefaultCredentials '
+            $return = Invoke-Expression $cmd
         } else {
-            # Invoke web request using proxy without body
-            $return = Invoke-WebRequest -Uri $Uri -Method $Method -headers $Headers -ContentType $ContentType -Proxy $((Get-K5Vars)["proxyURL"]) -ProxyUseDefaultCredentials
-        }
-    } else {
-    # No proxy required, was there a body passed?
-    if ($Body)
-        {
-            # Invoke web request without proxy including body
-            $return = Invoke-WebRequest -Uri $Uri -Method $Method -headers $Headers -Body $Body -ContentType $ContentType
-        } else {
-            # Invoke web request without proxy and without body
-            $return = Invoke-WebRequest -Uri $Uri -Method $Method -headers $Headers -ContentType $ContentType
+            # Something else went wrong, throw the erro back to the caling function
+            throw $_
         }
     }
     # Return the web request return
@@ -443,30 +446,50 @@ metadata                             : @{admin_pass=}
     if ((-not $token) -or (-not $type)) {break}
     $type_nw    = "routers","networks","subnets","ports","security-groups","security-group-rules","floatingips","network_connectors","network_connector_endpoints"
     $type_fw    = "firewalls","firewall_rules","firewall_policies"
+    $type_vpn   = "ipsecpolicies","ipsec-site-connections","vpnservices","ikepolicies"
     $type_comp  = "servers","images","flavors","os-keypairs"
     $type_block = "volumes","types","snapshots"
     $type_obj   = "containers"
-    $type_user  = "users"
+    $type_user  = "users","groups"
+    $type_role = "roles"
     $type_stack = "stacks"
+    $type_db = "instances"
+    $type_limit = "limits"
     $validtypes = ((Get-Variable -name type_*).Value | sort) -join ", " 
     switch ($type)
     {
        {$_ -in $type_nw}    {$endpoint = $token.endpoints["networking"] + "/v2.0/" + $type}
        {$_ -in $type_fw}    {$endpoint = $token.endpoints["networking"] + "/v2.0/fw/" + $type}
+       {$_ -in $type_vpn}   {$endpoint = $token.endpoints["networking"] + "/v2.0/vpn/" + $type}
        {$_ -in $type_comp}  {$endpoint = $token.endpoints["compute"] +"/" + $type}
+       {$_ -in $type_limit} {$endpoint = $token.endpoints["compute"] +"/" + $type}
        {$_ -in $type_block} {$endpoint = $token.endpoints["blockstoragev2"] +"/" + $type}
        {$_ -in $type_obj}   {$endpoint = $token.endpoints["objectstorage"] + "/?format=json"}
-       {$_ -in $type_user}  {$endpoint = $token.endpoints["identityv3"] + "/users/?domain_id=" + $token.domainid}
+       {$_ -in $type_user}  {$endpoint = $token.endpoints["identityv3"] + "/" + $type + "/?domain_id=" + $token.domainid}
+       {$_ -in $type_role}  {$endpoint = $token.endpoints["identityv3"] + "/roles"}
        {$_ -in $type_stack} {$endpoint = $token.endpoints["orchestration"] +"/stacks"}
-       default              {Display-Error -error "Unknown type 'type' - acceptable values are $validtypes"}
+       {$_ -in $type_db}    {$endpoint = $token.endpoints["database"] +"/instances"}
+       default              {Display-Error -error "Unknown type `'$type`' - acceptable values are $validtypes"}
     }
     if (-not $endpoint){break}
     try
     {
+        if ($type -in $type_limit)
+        {
+            $return = @()
+            $detail = (Invoke-WebRequest2 -token $token -Uri "${endpoint}?availability_zone=$($token.region)a" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy | ConvertFrom-Json).limits.absolute
+            $detail | Add-Member -MemberType NoteProperty -Name "AZ" -Value "$($token.region)a"
+            $return += $detail
+            $detail = (Invoke-WebRequest2 -token $token -Uri "${endpoint}?availability_zone=$($token.region)b" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy | ConvertFrom-Json).limits.absolute
+            $detail | Add-Member -MemberType NoteProperty -Name "AZ" -Value "$($token.region)b"
+            $return += $detail
+            return $return
+            break
+        }
         $detail = (Invoke-WebRequest2 -token $token -Uri "$endpoint" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy).content | ConvertFrom-Json
         if ($detail)
         {
-            if ($type -in $obj)
+            if ($type -in $type_obj)
             {
                 if ($name) {$detail = $detail  | where name -eq $name}
                 if (-not $detail) { Display-Error -error "Resource named: $name of type: $type not found"}
@@ -491,11 +514,14 @@ metadata                             : @{admin_pass=}
             } else {
                 while (($detail | gm -MemberType NoteProperty).count -in 1..2)
                 {
-                    $detail = $detail.$(($detail | gm)[-1].Name)
+                    $detail = $detail.$(($detail | gm | where name -ne "links")[-1].Name)
                 }
                 if ($detail.stack_name -ne $null){$detail | Add-Member -MemberType AliasProperty -Name name -Value stack_name}
-                if ($name) {$detail = $detail  | where name -eq $name}
-                if (-not $detail) { Display-Error -error "Resource named '$name' of type '$type' not found"}
+                if ($name)
+                {
+                    $detail = $detail  | where name -eq $name
+                    if (-not $detail) { Display-Error -error "Resource named '$name' of type '$type' not found"}
+                }
                 if ($detailed)
                 {
                     if ((($detail.links -ne $null) -or ($detail.id -eq $null)) -and ( $type -ne $user))
@@ -520,7 +546,49 @@ metadata                             : @{admin_pass=}
     {
         Display-Error -error "Get-K5Resources failed..." -errorObj $_
     }
+    foreach ($object in $return)
+    {
+        $object | Add-Member -MemberType NoteProperty -Name "self" -Value "$endpoint/$($object.id)"
+    }
     return $return
+}
+
+
+Function Get-K5RoleToGroupAssignments
+{
+    param
+    (
+        [pscustomobject]$token = $(Display-Error -error "Please supply a token using the -token parameter"),
+        [string]$groupid = $(Display-Error -error "Please specify a group id using the -groupid parameter"),
+        [string]$projectid = $($token.projectid),
+        [switch]$UseProxy
+    )
+    $detail = (Invoke-WebRequest2 -Uri "$($token.endpoints["identityv3"])/projects/$projectid/groups/$groupid/roles" -Method GET -headers $token.token -ContentType "application/json" -UseProxy $useProxy).Content | ConvertFrom-Json
+    return $detail.roles
+}
+
+Function Modify-K5RoleToGroupAssignments
+{
+    param
+    (
+        [pscustomobject]$token = $(Display-Error -error "Please supply a token using the -token parameter"),
+        [string]$roleid = $(Display-Error -error "Please specify a role id using the -roleid parameter"),
+        [string]$groupid = $(Display-Error -error "Please specify a group id using the -groupid parameter"),
+        [string]$projectid = $($token.projectid),
+        [Parameter()][ValidateSet('Add','Delete')][string]$operation = "Add",
+        [switch]$UseProxy
+    )
+    switch ($operation)
+    {
+        Add    {$detail = (Invoke-WebRequest2 -Uri "$($token.endpoints["identityv3"])/projects/$projectid/groups/$groupid/roles/$roleid" -Method PUT -headers $token.token -ContentType "application/json" -UseProxy $useProxy).Content | ConvertFrom-Json}
+        Delete {$detail = (Invoke-WebRequest2 -Uri "$($token.endpoints["identityv3"])/projects/$projectid/groups/$groupid/roles/$roleid" -Method DELETE -headers $token.token -ContentType "application/json" -UseProxy $useProxy).Content | ConvertFrom-Json}
+    }
+    if ($useProxy)
+    {
+        Get-K5RoleToGroupAssignments -token $token -groupid $groupid -projectid $projectid -UseProxy
+    } else {
+        Get-K5RoleToGroupAssignments -token $token -groupid $groupid -projectid $projectid
+    }
 }
 
 
